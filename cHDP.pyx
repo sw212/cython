@@ -15,6 +15,26 @@ from libc.limits cimport LONG_MAX
 from cython.operator cimport dereference as deref, preincrement as inc
 
 cdef class Document:
+    """
+    Attributes
+    ----------
+    table_by_i : ndarray
+        Table of word i.
+    topic_by_table : ndarray
+        Topic of table t.
+    num_words_by_t : ndarray
+        Number of words at table t.
+    num_words_by_tw : ndarray of dict
+        Words associated to table t, represented as key:value
+        pair denoting word_id:count.
+    using_tables : list
+        List of tables currently occupied.
+    vacant_tables : list
+        List of tables that are currently empty but has had space
+        allocated to them.
+    num_tables : int
+        Total number of tables.
+    """
     cdef readonly np.int_t [:] words
     cdef public np.int_t [::1] table_by_i
     cdef public np.int_t [::1] topic_by_table
@@ -36,6 +56,43 @@ cdef class Document:
 
 
 cdef class HDP:
+    """
+    Hierarchical Dirichlet process topic model with a Gibbs sampling
+    scheme for posterior sampling in the Chinese restaurant franchise.
+    Variable/index names generally follow the notation in Teh, et al.
+    For example j is used to represent document indicies, i for word
+    indicies, t for tables, k for topics, and w for word ids.
+    Attributes
+    ----------
+    size_vocab : int
+        Number of unique words across all documents.
+    docs : ndarray of Document
+        Array of Document (restaurant) objects comprising a corpus.
+    num_words_by_kw : list of dict
+        Words associated to topic k, represented as key:value
+        pairs denoting word_id:count.
+    num_words_by_k : ndarray
+        Number of words by topic k.
+    num_tables_by_k : ndarray
+        Number of tables by topic k.
+    using_topics : list
+        List of topics in use across all documents.
+    vacant_topics : list
+        List of topics that currently not associated to any table
+        but has had space allocated to them.
+    global_num_tables : int
+        Total number of tables across all documents.
+    num_topics : int
+        Total number of unique topics at currently occupied tables
+        across all documents.
+    alpha : float
+        Table level concentration parameter.
+    gamma : float
+        Topic level concentration parameter.
+    eta : float
+        Dirichlet parameter for the base measure.
+    rng : Generator
+    """
     cdef public np.int_t size_vocab
     cdef public Document[:] docs
     cdef Document d
@@ -108,6 +165,16 @@ cdef class HDP:
                 self.assign_table(j, i, t_ind, k_ind)
 
     cdef void remove_word(self, np.int_t j, np.int_t i):
+        """
+        Removes word i from document j.
+
+        Parameters
+        ----------
+        j : int
+            Document index.
+        i : int
+            Word index.
+        """
         cdef np.int_t w, t, k
         w = self.d.words[i]
         t = self.d.table_by_i[i]
@@ -136,6 +203,16 @@ cdef class HDP:
                 self.vacant_topics.push_back(k)
 
     cdef void remove_topic(self, np.int_t j, np.int_t t):
+        """
+        Removes the topic of table t in document j.
+
+        Parameters
+        ----------
+        j : int
+            Document index.
+        t : int
+            Table number.
+        """
         cdef np.int_t k, w, count
         k = self.d.topic_by_table[t]
         self.num_tables_by_k[k] -= 1
@@ -158,6 +235,17 @@ cdef class HDP:
             inc(it)
 
     cdef void compute_f(self, np.int_t w):
+        """
+        Computes the conditional density of word i in document j for
+        each topic given everything but the assignment of this word.
+        This assumes the word is not currently assigned to a table,
+        so we only know what word it is i.e. the word id w.
+
+        Parameters
+        ----------
+        w : int
+            Word id of word to be assigned a table.
+        """
         cdef np.int_t i, k
         cdef np.float64_t eta_vocab = (self.eta * self.size_vocab)
         for i in range(self.num_topics):
@@ -165,6 +253,14 @@ cdef class HDP:
             self.f[i] = (self.eta + self.num_words_by_kw[k][w]) / (self.num_words_by_k[k] + eta_vocab)
 
     cdef void word_table_probabilities(self, np.int_t j):
+        """
+        Compute the table probabilities for word i in document j.
+
+        Parameters
+        ----------
+        j : int
+            Document index.
+        """
         cdef np.float64_t f_new, p_tot
         cdef np.int_t i, t, k, k_ind
 
@@ -188,6 +284,10 @@ cdef class HDP:
             self.p[i] /= p_tot
 
     cdef void word_topic_probabilities(self):
+        """
+        Compute the topic probabilities for a word assigned
+        to a new table.
+        """
         cdef np.float64_t q_tot = 0
         cdef np.int_t i, k
 
@@ -202,6 +302,23 @@ cdef class HDP:
             self.q[i] /= q_tot
 
     cdef (np.int_t, np.int_t) sample_table(self, np.int_t j, np.int_t i):
+        """
+        Sample the topic and table indexes for word i in document j.
+
+        Parameters
+        ----------
+        j : int
+            Document index.
+        i : int
+            Word index.
+
+        Returns
+        -------
+        Tuple[Optional[int], Optional[int]]
+            A table index, topic index tuple. Note that, unless a new
+            table is drawn, topic index will correspond to the topic of
+            the sampled table.
+        """
         cdef np.int_t w
         cdef np.float64_t u
         cdef np.int_t t, k, t_ind, k_ind
@@ -231,6 +348,16 @@ cdef class HDP:
                 return i
 
     cdef void table_topic_probabilities(self, np.int_t j, np.int_t t):
+        """
+        Computes new topic probabilities for table t in document j.
+
+        Parameters
+        ----------
+        j : int
+            Document index.
+        t : int
+            Table number.
+        """
         cdef np.float64_t eta_V, q_max
         cdef np.int_t w, k_ind, k
         cdef unordered_map[np.int_t,np.int_t].iterator it = self.d.num_words_by_tw[t].begin()
@@ -266,12 +393,40 @@ cdef class HDP:
             self.q[k_ind] /= q_max
 
     cdef np.int_t sample_topic(self, np.int_t j, np.int_t t):
+        """
+        Samples a new topic for table t in document j.
+
+        Parameters
+        ----------
+        j : int
+            Document index.
+        t : int
+            Table number.
+
+        Returns
+        -------
+        int
+            The index for the sampled topic with respect to the array
+            of topics in use.
+        """
         cdef np.float64_t u
         self.table_topic_probabilities(j, t)
         u = self.rng.random()
         return self.get_sampled_idx(self.q, u, 1+self.num_topics)
 
     cdef void assign_topic(self, np.int_t j, np.int_t t, np.int_t k_ind):
+        """
+        Assigns a topic to table t in document j.
+
+        Parameters
+        ----------
+        j : int
+            Document index.
+        t : int
+            Table number.
+        k_ind : Optional[int]
+            Topic index, for a new topic k_ind = None.
+        """
         cdef np.int_t k, w 
         if k_ind == self.num_topics:
             self.num_topics += 1
@@ -296,6 +451,21 @@ cdef class HDP:
             inc(it)
 
     cdef void assign_table(self, np.int_t j, np.int_t i, np.int_t t_ind, np.int_t k_ind):
+        """
+        Assigns word i from document j to a table.
+
+        Parameters
+        ----------
+        j : int
+            Document index.
+        i : int
+            Word index.
+        t_ind : Optional[int]
+            Table index, for a new table t_ind = None.
+        k_ind : Optional[int]
+            Topic index, only used if t_ind is None. For a new table
+            k_ind = None.
+        """
         cdef np.int_t w, t, k
 
         w = self.d.words[i]
@@ -385,6 +555,9 @@ cdef class HDP:
         raise ValueError('pop_min: no minimum found')
 
     cdef void add_topics(self):
+        """
+        Increase topic related array sizes.
+        """
         cdef np.int_t num_topics = self.num_tables_by_k.shape[0]
         cdef np.int_t i
         self.f = np.hstack((self.f, np.zeros_like(self.f)))
@@ -399,6 +572,9 @@ cdef class HDP:
         self.num_tables_by_k = np.hstack((self.num_tables_by_k, np.zeros_like(self.num_tables_by_k)))
 
     cdef void add_tables(self, np.int_t j):
+        """
+        Increase table related array sizes for document j.
+        """
         cdef np.int_t max_table = 0
         cdef np.int_t n_tables = self.d.topic_by_table.shape[0]
         cdef np.int_t i
@@ -418,6 +594,12 @@ cdef class HDP:
         self.d.num_words_by_t = np.hstack((self.d.num_words_by_t, np.zeros_like(self.d.num_words_by_t)))
 
     def gibbs_step(self):
+        """
+        Undergoes Gibbs sampling of the posterior in the Chinese
+        restaurant franchise as described in 5.1 from Teh, et al.
+        Sampling is systematic; we first sample the table for each word
+        in a document, then we sample the topic for each table.
+        """
         cdef np.int_t j, i, t_ind, k_ind
         for j in range(self.docs.shape[0]):
             self.d = self.docs[j]
