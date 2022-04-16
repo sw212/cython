@@ -18,6 +18,8 @@ cdef class Document:
     """
     Attributes
     ----------
+    words : ndarray
+        Words (by id) of document.
     table_by_i : ndarray
         Table of word i.
     topic_by_table : ndarray
